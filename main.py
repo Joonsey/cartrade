@@ -191,21 +191,28 @@ async def get_cars(writer: csv.DictWriter, brand: BrandEnum, model: ModelEnum):
 async def main(file):
     tasks = []
 
-    tasks.append(get_cars(file, BrandEnum.AUDI, ModelEnum.A_A4))
-    tasks.append(get_cars(file, BrandEnum.HONDA, ModelEnum.H_Accord))
-    tasks.append(get_cars(file, BrandEnum.NISSAN, ModelEnum.N_Note))
-    tasks.append(get_cars(file, BrandEnum.NISSAN, ModelEnum.N_Silvia))
-    tasks.append(get_cars(file, BrandEnum.NISSAN, ModelEnum.N_GTR))
-    tasks.append(get_cars(file, BrandEnum.NISSAN, ModelEnum.N_Leaf))
-    tasks.append(get_cars(file, BrandEnum.TOYOTA, ModelEnum.T_Celica))
-    tasks.append(get_cars(file, BrandEnum.BMW, ModelEnum.B_X5))
-    tasks.append(get_cars(file, BrandEnum.FORD, ModelEnum.F_Explorer))
+    tasks.append(get_cars(file, BrandEnum.AUDI,     ModelEnum.A_A4))
+    tasks.append(get_cars(file, BrandEnum.HONDA,    ModelEnum.H_Accord))
+    tasks.append(get_cars(file, BrandEnum.NISSAN,   ModelEnum.N_Note))
+    tasks.append(get_cars(file, BrandEnum.NISSAN,   ModelEnum.N_Silvia))
+    tasks.append(get_cars(file, BrandEnum.NISSAN,   ModelEnum.N_GTR))
+    tasks.append(get_cars(file, BrandEnum.NISSAN,   ModelEnum.N_Leaf))
+    tasks.append(get_cars(file, BrandEnum.TOYOTA,   ModelEnum.T_Celica))
+    tasks.append(get_cars(file, BrandEnum.BMW,      ModelEnum.B_X5))
+    tasks.append(get_cars(file, BrandEnum.FORD,     ModelEnum.F_Explorer))
     tasks.append(get_cars(file, BrandEnum.MERCEDES, ModelEnum.M_G_class))
 
     await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
     with open("data.csv", "+w") as file:
-        writer = csv.DictWriter(file, fieldnames)
-        writer.writeheader()
-        asyncio.run(main(writer))
+
+        def run():
+            writer = csv.DictWriter(file, fieldnames)
+            writer.writeheader()
+            asyncio.run(main(writer))
+
+        try:
+            run()
+        except httpx.RemoteProtocolError:
+            run()
