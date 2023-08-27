@@ -1,11 +1,26 @@
 #!/usr/bin/python
-
+import os
+from supabase.client import create_client
+from datetime import datetime
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
 import csv
 import asyncio
 import httpx
 from enum import Enum
+
+supabase_url = os.environ.get("SUPABASE_URL")
+key = os.environ.get("SUPABASE_KEY")
+
+DRY_RUN = False
+
+if not key or not supabase_url and not DRY_RUN:
+    print("error: missing environment varibles.")
+    exit(1)
+
+supabase = None
+if not DRY_RUN and key and supabase_url:
+    supabase = create_client(supabase_url, key)
 
 class BrandEnum(Enum):
     AUDI = 'audi-26'
@@ -32,26 +47,26 @@ class ModelEnum(Enum):
 
 fieldnames = {
     "FOB", "CIF", "currency",
-    "make", "model", 
-    "reg", "milage", "cc", "transmission", "steering", "fuel", "doors",
+    "make", "model",
+    "registered", "mileage", "cc", "transmission", "steering", "fuel", "doors",
     "url"
 }
 
 @dataclass
 class Price:
-    FOB: str
-    CIF: float 
+    FOB: float | None
+    CIF: float | None
     currency: str
 
 @dataclass
 class Info:
-    reg: str
-    mileage: str
-    cc: str
-    transmission: str 
+    reg: datetime | None
+    mileage: int | None
+    cc: int | None
+    transmission: str
     steering: str
     fuel: str
-    doors: str
+    doors: int | None
     make: str
     model: str
 
@@ -68,8 +83,8 @@ class CarAd:
         "make": self.info.make,
         "model": self.info.model,
         "currency": self.price.currency,
-        "reg": self.info.reg,
-        "milage": self.info.mileage,
+        "registered": (self.info.reg.isoformat() if self.info.reg != None else None),
+        "mileage": self.info.mileage,
         "cc": self.info.cc,
         "transmission": self.info.transmission,
         "steering": self.info.steering,
@@ -78,6 +93,26 @@ class CarAd:
         "url": self.url
         }
 
+def convert_to_datetime(date_str) -> datetime | None:
+    try:
+        if '/' in date_str:
+            return datetime.strptime(date_str, '%Y/%m')
+        else:
+            return datetime.strptime(date_str, '%Y')
+    except ValueError:
+        return None  # Return None if the conversion fails
+
+def try_float(n: str) -> float | None:
+    try:
+        return float(n)
+    except:
+        return None
+
+def try_int(n: str) -> int | None:
+    try:
+        return int(n)
+    except:
+        return None
 
 async def make_ad_from_page(link: str, client: httpx.AsyncClient) -> CarAd: 
 
@@ -102,9 +137,9 @@ async def make_ad_from_page(link: str, client: httpx.AsyncClient) -> CarAd:
     #         currency = option.get_text()
 
     reg = get_attr(soup, "Reg. Year/Month")
-    milage = get_attr(soup, "Mileage")
-    doors = get_attr(soup, "Doors")
-    cc = get_attr(soup, "Engine CC")
+    milage = get_attr(soup, "Mileage").replace(' KM' , '').replace(',','')
+    doors = get_attr(soup, "Doors").replace('Doors', '')
+    cc = get_attr(soup, "Engine CC").replace(' CC', '').replace(',','')
     transmission = get_attr(soup, "Transmission")
     steering = get_attr(soup, "Steering")
     fuel = get_attr(soup, "Fuel")
@@ -119,22 +154,23 @@ async def make_ad_from_page(link: str, client: httpx.AsyncClient) -> CarAd:
 
     price = soup.find("div", class_="fob_price")
     price = (price.find("span").find("strong").text if price != None else "0")
+    price = price.replace(',','')
 
     return CarAd(
         Price(
-            price, 
-            0, 
+            try_float(price),
+            0,
             str(currency)),
         link,
         Info(
-            reg, 
-            milage, 
-            cc, 
-            transmission, 
-            steering, 
-            fuel, 
-            doors, 
-            str(make), 
+            convert_to_datetime(reg),
+            try_int(milage),
+            try_int(cc),
+            transmission,
+            steering,
+            fuel,
+            try_int(doors),
+            str(make),
             str(model)
         )
     )
@@ -164,11 +200,17 @@ async def get_links(url: str, client: httpx.AsyncClient):
 
     return links
 
-async def write_ad(link: str, client: httpx.AsyncClient, writer: csv.DictWriter):
+async def write_ad(link: str, client: httpx.AsyncClient, writer: csv.DictWriter, dry_run: bool = True):
     ad = await make_ad_from_page(link, client)
-    print(f"Reading {link}")
-    writer.writerow(ad.to_dict())
+    add = ad.to_dict()
 
+    writer.writerow(add)
+
+    if not dry_run and supabase != None:
+        try:
+            supabase.table("Car_Ads").insert(add).execute()
+        except Exception as e:
+            print(e)
 
 async def get_cars(writer: csv.DictWriter, brand: BrandEnum, model: ModelEnum):
 
@@ -182,11 +224,11 @@ async def get_cars(writer: csv.DictWriter, brand: BrandEnum, model: ModelEnum):
             client.headers['User-Agent'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
 
             for link in await get_links(url, client):
-                tasks.append(write_ad(link, client, writer))
+                tasks.append(write_ad(link, client, writer, False))
 
 
         print('Ready, Set, Go!')
-        await asyncio.gather(*tasks)        
+        await asyncio.gather(*tasks)
 
 async def main(file):
     tasks = []
