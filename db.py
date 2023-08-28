@@ -1,12 +1,30 @@
-#!/bin/python
+#!/usr/bin/python
 import os
-from supabase.client import create_client
 
-url = os.environ.get("SUPABASE_URL")
-key = os.environ.get("SUPABASE_KEY")
+from dotenv import load_dotenv
+from postgrest._async.client import AsyncPostgrestClient
 
-if not key or not url:
-    print("error: missing environment varibles.")
-    exit(1)
+load_dotenv()
 
-supabase = create_client(url, key)
+def make_db_client():
+    base_url = os.environ.get("BASE_URL")
+    if not base_url:
+        print("error: missing environment varibles.")
+        exit(1)
+
+    return AsyncPostgrestClient(base_url, schema="api", headers={
+        'Authorization': f'Bearer {os.environ.get("TOKEN")}',
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        })
+
+
+def check_duplicate(response): 
+    if hasattr(response, "code"):
+        return any(response['code'] == 23505)
+    return False
+
+def check_error(response) -> bool: 
+    failed = hasattr(response, "code")
+    if failed: print(f"ERROR: {response}")
+    return failed

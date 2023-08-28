@@ -1,26 +1,21 @@
 #!/usr/bin/python
-import os
-from supabase.client import create_client
 from datetime import datetime
 from bs4 import BeautifulSoup
-from dataclasses import dataclass
-import csv
 import asyncio
 import httpx
 from enum import Enum
+from dotenv import load_dotenv
 
-supabase_url = os.environ.get("SUPABASE_URL")
-key = os.environ.get("SUPABASE_KEY")
+from db import check_duplicate, check_error, make_db_client
 
-DRY_RUN = False
+from schemas.ad import Ad, Info, Price
+from schemas.job import JobResponse, create_default_job, Job
 
-if not key or not supabase_url and not DRY_RUN:
-    print("error: missing environment varibles.")
-    exit(1)
+load_dotenv()
 
-supabase = None
-if not DRY_RUN and key and supabase_url:
-    supabase = create_client(supabase_url, key)
+
+database = make_db_client()
+
 
 class BrandEnum(Enum):
     AUDI = 'audi-26'
@@ -45,53 +40,6 @@ class ModelEnum(Enum):
     M_G_class = 'g+class-2718'
     B_X5 = 'x5-429'
 
-fieldnames = {
-    "FOB", "CIF", "currency",
-    "make", "model",
-    "registered", "mileage", "cc", "transmission", "steering", "fuel", "doors",
-    "url"
-}
-
-@dataclass
-class Price:
-    FOB: float | None
-    CIF: float | None
-    currency: str
-
-@dataclass
-class Info:
-    reg: datetime | None
-    mileage: int | None
-    cc: int | None
-    transmission: str
-    steering: str
-    fuel: str
-    doors: int | None
-    make: str
-    model: str
-
-@dataclass
-class CarAd:
-    price: Price
-    url: str
-    info: Info
-
-    def to_dict(self):
-        return {
-        "FOB": self.price.FOB,
-        "CIF": self.price.CIF,
-        "make": self.info.make,
-        "model": self.info.model,
-        "currency": self.price.currency,
-        "registered": (self.info.reg.isoformat() if self.info.reg != None else None),
-        "mileage": self.info.mileage,
-        "cc": self.info.cc,
-        "transmission": self.info.transmission,
-        "steering": self.info.steering,
-        "fuel": self.info.fuel,
-        "doors": self.info.doors,
-        "url": self.url
-        }
 
 def convert_to_datetime(date_str) -> datetime | None:
     try:
@@ -114,7 +62,7 @@ def try_int(n: str) -> int | None:
     except:
         return None
 
-async def make_ad_from_page(link: str, client: httpx.AsyncClient) -> CarAd: 
+async def make_ad_from_page(link: str, client: httpx.AsyncClient) -> Ad: 
 
     def get_attr(soup: BeautifulSoup, attr: str):
         element = soup.find("span", attrs = {"aria-label": attr})
@@ -128,13 +76,6 @@ async def make_ad_from_page(link: str, client: httpx.AsyncClient) -> CarAd:
     soup = BeautifulSoup(response.text, "html.parser")
 
     currency = "USD"
-
-    # this doesnt work be cause javascript is too slow omegalul
-    # options = soup.find_all("option")
-    # for option in options:
-    #     if option.has_attr('selected'):
-    #         print("found currency")
-    #         currency = option.get_text()
 
     reg = get_attr(soup, "Reg. Year/Month")
     milage = get_attr(soup, "Mileage").replace(' KM' , '').replace(',','')
@@ -153,10 +94,10 @@ async def make_ad_from_page(link: str, client: httpx.AsyncClient) -> CarAd:
             model = entry.parent.find('strong').get_text()
 
     price = soup.find("div", class_="fob_price")
-    price = (price.find("span").find("strong").text if price != None else "0")
+    price = (price.find("span").find("strong").text if price != None else "0") # type: ignore
     price = price.replace(',','')
 
-    return CarAd(
+    return Ad(
         Price(
             try_float(price),
             0,
@@ -200,19 +141,27 @@ async def get_links(url: str, client: httpx.AsyncClient):
 
     return links
 
-async def write_ad(link: str, client: httpx.AsyncClient, writer: csv.DictWriter, dry_run: bool = True):
+async def write_ad(job:JobResponse, link: str, client: httpx.AsyncClient, dry_run: bool = True):
     ad = await make_ad_from_page(link, client)
     add = ad.to_dict()
+    add['from_job'] = job.id
 
-    writer.writerow(add)
-
-    if not dry_run and supabase != None:
+    if not dry_run and database != None:
         try:
-            supabase.table("Car_Ads").insert(add).execute()
+            r = await database.from_("ads").insert(add).execute()
+
+            if check_duplicate(r):
+                job.duplicates += 1
+
+            if check_error(r):
+                job.ads_failed_to_create += 1
+
+            else:
+                job.total_ads_created += 1
         except Exception as e:
             print(e)
 
-async def get_cars(writer: csv.DictWriter, brand: BrandEnum, model: ModelEnum):
+async def get_cars(job: JobResponse, brand: BrandEnum, model: ModelEnum):
 
     print('starting...', brand, model)
 
@@ -224,37 +173,31 @@ async def get_cars(writer: csv.DictWriter, brand: BrandEnum, model: ModelEnum):
             client.headers['User-Agent'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
 
             for link in await get_links(url, client):
-                tasks.append(write_ad(link, client, writer, False))
+                tasks.append(write_ad(job, link, client, False))
 
 
         print('Ready, Set, Go!')
         await asyncio.gather(*tasks)
 
-async def main(file):
+async def main():
     tasks = []
 
-    tasks.append(get_cars(file, BrandEnum.AUDI,     ModelEnum.A_A4))
-    tasks.append(get_cars(file, BrandEnum.HONDA,    ModelEnum.H_Accord))
-    tasks.append(get_cars(file, BrandEnum.NISSAN,   ModelEnum.N_Note))
-    tasks.append(get_cars(file, BrandEnum.NISSAN,   ModelEnum.N_Silvia))
-    tasks.append(get_cars(file, BrandEnum.NISSAN,   ModelEnum.N_GTR))
-    tasks.append(get_cars(file, BrandEnum.NISSAN,   ModelEnum.N_Leaf))
-    tasks.append(get_cars(file, BrandEnum.TOYOTA,   ModelEnum.T_Celica))
-    tasks.append(get_cars(file, BrandEnum.BMW,      ModelEnum.B_X5))
-    tasks.append(get_cars(file, BrandEnum.FORD,     ModelEnum.F_Explorer))
-    tasks.append(get_cars(file, BrandEnum.MERCEDES, ModelEnum.M_G_class))
+    default_job = create_default_job()
+    job = JobResponse(**(await database.from_("jobs").insert(default_job.to_dict()).execute()).data[0])
+
+    tasks.append(get_cars(job, BrandEnum.AUDI,     ModelEnum.A_A4))
+    tasks.append(get_cars(job, BrandEnum.HONDA,    ModelEnum.H_Accord))
+    tasks.append(get_cars(job, BrandEnum.NISSAN,   ModelEnum.N_Note))
+    tasks.append(get_cars(job, BrandEnum.NISSAN,   ModelEnum.N_Silvia))
+    tasks.append(get_cars(job, BrandEnum.NISSAN,   ModelEnum.N_GTR))
+    tasks.append(get_cars(job, BrandEnum.NISSAN,   ModelEnum.N_Leaf))
+    tasks.append(get_cars(job, BrandEnum.TOYOTA,   ModelEnum.T_Celica))
+    tasks.append(get_cars(job, BrandEnum.BMW,      ModelEnum.B_X5))
+    tasks.append(get_cars(job, BrandEnum.FORD,     ModelEnum.F_Explorer))
+    tasks.append(get_cars(job, BrandEnum.MERCEDES, ModelEnum.M_G_class))
 
     await asyncio.gather(*tasks)
+    await database.from_("jobs").update(job.to_dict()).eq("id", job.id).execute()
 
 if __name__ == "__main__":
-    with open("data.csv", "+w") as file:
-
-        def run():
-            writer = csv.DictWriter(file, fieldnames)
-            writer.writeheader()
-            asyncio.run(main(writer))
-
-        try:
-            run()
-        except httpx.RemoteProtocolError:
-            run()
+    asyncio.run(main())
